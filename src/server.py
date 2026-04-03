@@ -101,20 +101,29 @@ def create_server():
     # Both modes expose /health and /version at root and under /mcp/.
     # ──────────────────────────────────────────────────────────────
 
-    transport_app = mcp.streamable_http_app() if config.transport == "streamable-http" else mcp.sse_app()
-    mount_info = "Streamable HTTP (/mcp)" if config.transport == "streamable-http" else "SSE (/mcp/sse)"
-
-    app = Starlette(
-        routes=[
-            Route("/health", health_endpoint, methods=["GET"]),
-            Route("/version", version_endpoint, methods=["GET"]),
-            Mount("/mcp", routes=[
-                Route("/version", version_endpoint, methods=["GET"]),
+    if config.transport == "streamable-http":
+        # FastMCP streamable-http expects POST to /mcp natively and needs its own
+        # lifespan to execute so it initializes the TaskGroup. It must be the root app.
+        app = mcp.streamable_http_app()
+        from starlette.routing import Route as SRoute
+        app.routes.insert(0, SRoute("/health", health_endpoint, methods=["GET"]))
+        app.routes.insert(1, SRoute("/version", version_endpoint, methods=["GET"]))
+        app.routes.insert(2, SRoute("/mcp/health", health_endpoint, methods=["GET"]))
+        app.routes.insert(3, SRoute("/mcp/version", version_endpoint, methods=["GET"]))
+        mount_info = "Streamable HTTP (POST /mcp)"
+    else:
+        app = Starlette(
+            routes=[
                 Route("/health", health_endpoint, methods=["GET"]),
-                Mount("/", app=transport_app),
-            ]),
-        ]
-    )
+                Route("/version", version_endpoint, methods=["GET"]),
+                Mount("/mcp", routes=[
+                    Route("/version", version_endpoint, methods=["GET"]),
+                    Route("/health", health_endpoint, methods=["GET"]),
+                    Mount("/", app=mcp.sse_app()),
+                ]),
+            ]
+        )
+        mount_info = "SSE (/mcp/sse)"
 
     # CORS para clientes basados en Web/Electron (Cursor)
     app.add_middleware(
