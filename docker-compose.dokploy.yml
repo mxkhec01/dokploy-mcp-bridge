@@ -3,13 +3,8 @@
 # Copiar este servicio dentro del docker-compose de tu stack.
 # =============================================================
 #
-# Variables requeridas en .env o en Dokploy:
-#   DATABASE_URI=postgresql://user:pass@db_service:5432/dbname
-#   MCP_BASIC_AUTH=usuario:$$apr1$$hash_escapado
-#
-# Para múltiples DBs, agregar:
-#   DATABASE_URI_PUI=postgresql://...
-#   DATABASE_URI_CEVI=mysql://...
+# El enrutamiento y HTTPS se hace directo desde la interfaz de Dokploy
+# (agregando un Dominio que apunte al puerto 8000 en el path /mcp).
 #
 
 services:
@@ -17,22 +12,13 @@ services:
     image: ghcr.io/mxkhec01/dokploy-mcp-bridge:latest
     restart: unless-stopped
     environment:
-      - DATABASE_URI=${DATABASE_URI}
-      # Multi-DB: descomenta y agrega más aliases
-      # - DATABASE_URI_PUI=${DATABASE_URI_PUI}
-      # - DATABASE_URI_CEVI=${DATABASE_URI_CEVI}
+      - DATABASE_URI=${POSTGRES_URL}
+      # - DATABASE_URI_OTRA=${MYSQL_URL}
       - ACCESS_MODE=restricted
+      # Autenticación Básica a nivel aplicación (Texto plano, ej. admin:mi_contraseña)
+      - MCP_BASIC_AUTH=${MCP_BASIC_AUTH}
     volumes:
       # CRITICAL: Read-only Docker socket mount
       - /var/run/docker.sock:/var/run/docker.sock:ro
     cap_drop:
       - ALL
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.mcp-bridge.rule=Host(`mcp.tudominio.com`)"
-      - "traefik.http.routers.mcp-bridge.entrypoints=websecure"
-      - "traefik.http.routers.mcp-bridge.tls.certresolver=letsencrypt"
-      - "traefik.http.services.mcp-bridge.loadbalancer.server.port=8000"
-      # BasicAuth middleware
-      - "traefik.http.routers.mcp-bridge.middlewares=mcp-auth"
-      - "traefik.http.middlewares.mcp-auth.basicauth.users=${MCP_BASIC_AUTH}"

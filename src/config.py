@@ -19,6 +19,7 @@ class BridgeConfig:
     port: int = 8000
     db_uris: dict[str, str] = field(default_factory=dict)
     max_query_rows: int = 100
+    basic_auth: str | None = None  # Expected format: "user:pass"
 
     # SQL guardrail pattern — blocks destructive ops in restricted mode
     FORBIDDEN_SQL: re.Pattern = field(
@@ -41,18 +42,12 @@ class BridgeConfig:
 def parse_db_uris() -> dict[str, str]:
     """
     Parse DATABASE_URI env vars.
-    Supports:
-      - DATABASE_URI          -> alias "default"
-      - DATABASE_URI_<name>   -> alias "<name>" (lowercased)
     """
     uris: dict[str, str] = {}
-
-    # Primary URI
     primary = os.getenv("DATABASE_URI")
     if primary:
         uris["default"] = primary
 
-    # Numbered/named URIs: DATABASE_URI_PUI, DATABASE_URI_CEVI, etc.
     for key, value in os.environ.items():
         if key.startswith("DATABASE_URI_") and value:
             alias = key.replace("DATABASE_URI_", "").lower()
@@ -103,4 +98,5 @@ def load_config() -> BridgeConfig:
         port=args.port,
         db_uris=parse_db_uris(),
         max_query_rows=args.max_rows,
+        basic_auth=os.getenv("MCP_BASIC_AUTH"),
     )
