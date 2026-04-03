@@ -1,20 +1,15 @@
 """
 Dokploy MCP Bridge — Main Server Entry Point.
-
-A sidecar container that exposes infrastructure tools (DB queries, Docker ops)
-via the Model Context Protocol, designed to run alongside Dokploy deployments.
-
-Usage:
-    python -m src.server --transport=streamable-http --access-mode=restricted
 """
 
 import sys
 import base64
 import uvicorn
 from starlette.applications import Starlette
-from starlette.responses import Response, PlainTextResponse
+from starlette.responses import Response, PlainTextResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.cors import CORSMiddleware  # <-- IMPORTANTE NUEVO IMPORT
 
 from mcp.server.fastmcp import FastMCP
 
@@ -30,8 +25,8 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
         self.expected = expected_credentials
         
     async def dispatch(self, request, call_next):
-        # Exclude internal healthcheck from auth requirement
-        if request.url.path == "/health":
+        # FIX 1: Excluir el healthcheck y las peticiones de CORS (OPTIONS) del chequeo de Auth
+        if request.url.path == "/health" or request.method == "OPTIONS":
             return await call_next(request)
 
         if "authorization" not in request.headers:
@@ -50,20 +45,41 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
         return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
 
 
-class TraefikRootPathMiddleware(BaseHTTPMiddleware):
+class TraefikSSEFixMiddleware(BaseHTTPMiddleware):
     """
-    Forces the ASGI scope's root_path to a specific prefix.
-    When Traefik strips the path (e.g. /mcp), the Starlette app doesn't know it's mounted.
-    This ensures FastMCP's SSE endpoint URI generator explicitly includes /mcp
-    so the client Cursor knows where to POST the subsequent messages.
+    Sustituye a TraefikRootPathMiddleware.
+    Intercepta el flujo SSE en tiempo real y reescribe el endpoint para que el 
+    cliente sepa que debe inyectar el prefijo /mcp en sus peticiones POST.
     """
-    def __init__(self, app, root_path: str):
+    def __init__(self, app, public_prefix: str = "/mcp"):
         super().__init__(app)
-        self.root_path = root_path
+        self.public_prefix = public_prefix
         
     async def dispatch(self, request, call_next):
-        request.scope["root_path"] = self.root_path
-        return await call_next(request)
+        response = await call_next(request)
+        
+        # Si la respuesta es un flujo SSE, lo modificamos al vuelo
+        if response.headers.get("content-type", "").startswith("text/event-stream"):
+            original_iterator = getattr(response, "body_iterator", None)
+            if original_iterator:
+                async def rewrite_generator():
+                    async for chunk in original_iterator:
+                        # Remplazamos la orden que FastMCP le da al cliente
+                        if isinstance(chunk, bytes):
+                            chunk = chunk.replace(b"data: /messages", f"data: {self.public_prefix}/messages".encode("utf-8"))
+                        elif isinstance(chunk, str):
+                            chunk = chunk.replace("data: /messages", f"data: {self.public_prefix}/messages")
+                        yield chunk
+                        
+                headers = dict(response.headers)
+                headers.pop("content-length", None)
+                return StreamingResponse(
+                    rewrite_generator(),
+                    status_code=response.status_code,
+                    headers=headers
+                )
+                
+        return response
 
 
 def health_endpoint(request):
@@ -74,12 +90,10 @@ def create_server():
     """Create and configure the MCP server with all tools."""
     config = load_config()
 
-    # Initialize FastMCP with production-optimized settings
     mcp = FastMCP(
         "Dokploy-MCP-Bridge",
         port=config.port,
         host=config.host,
-        stateless_http=True,
         json_response=True,
     )
 
@@ -88,18 +102,24 @@ def create_server():
     register_docker_tools(mcp, config)
     register_system_tools(mcp, config)
 
-    # Wrap FastMCP internals inside a Starlette App to inject Application-Level HTTP BasicAuth
-    # This allows it to run safely behind standard Dokploy URLs without Traefik middleware hassle.
     app = Starlette(
         routes=[
             Route("/health", health_endpoint, methods=["GET"]),
-            # When Dokploy's (Traefik) Strip Path is true, it passes /sse and /messages/ directly
             Mount("/", app=mcp.sse_app()), 
         ]
     )
 
-    # Add middleare to force '/mcp' root path so the SSE server sends the correct callback URL
-    app.add_middleware(TraefikRootPathMiddleware, root_path="/mcp")
+    # FIX 2: Añadimos CORS nativo para clientes basados en Web/Electron
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # FIX 3: Inyectamos el middleware que corrige el bug de la ruta de Traefik
+    app.add_middleware(TraefikSSEFixMiddleware, public_prefix="/mcp")
 
     if config.basic_auth:
         app.add_middleware(BasicAuthMiddleware, expected_credentials=config.basic_auth)
@@ -130,7 +150,6 @@ def main():
     if config.transport in ["streamable-http", "sse"]:
         uvicorn.run(app, host=config.host, port=config.port, log_level="info")
     else:
-        # Fallback for stdio
         raise NotImplementedError("Only streamable-http/sse transports are currently supported with the custom Starlette runner.")
 
 
