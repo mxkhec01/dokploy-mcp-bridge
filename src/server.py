@@ -101,37 +101,20 @@ def create_server():
     # Both modes expose /health and /version at root and under /mcp/.
     # ──────────────────────────────────────────────────────────────
 
-    if config.transport == "streamable-http":
-        # FastMCP http_app crea un Starlette app con ruta en `path`.
-        # Lo montamos en raíz para que /mcp sea el endpoint final.
-        mcp_app = mcp.http_app(
-            path="/mcp",
-            transport="streamable-http",
-            json_response=True,
-            stateless_http=True,
-        )
-        # Inyectamos nuestras rutas auxiliares en el app de FastMCP
-        from starlette.routing import Route as SRoute
-        mcp_app.routes.insert(0, SRoute("/health", health_endpoint, methods=["GET"]))
-        mcp_app.routes.insert(1, SRoute("/version", version_endpoint, methods=["GET"]))
-        mcp_app.routes.insert(2, SRoute("/mcp/health", health_endpoint, methods=["GET"]))
-        mcp_app.routes.insert(3, SRoute("/mcp/version", version_endpoint, methods=["GET"]))
-        app = mcp_app
-        mount_info = "Streamable HTTP: POST /mcp"
-    else:
-        # SSE transport (legacy)
-        app = Starlette(
-            routes=[
-                Route("/health", health_endpoint, methods=["GET"]),
+    transport_app = mcp.streamable_http_app() if config.transport == "streamable-http" else mcp.sse_app()
+    mount_info = "Streamable HTTP (/mcp)" if config.transport == "streamable-http" else "SSE (/mcp/sse)"
+
+    app = Starlette(
+        routes=[
+            Route("/health", health_endpoint, methods=["GET"]),
+            Route("/version", version_endpoint, methods=["GET"]),
+            Mount("/mcp", routes=[
                 Route("/version", version_endpoint, methods=["GET"]),
-                Mount("/mcp", routes=[
-                    Route("/version", version_endpoint, methods=["GET"]),
-                    Route("/health", health_endpoint, methods=["GET"]),
-                    Mount("/", app=mcp.sse_app()),
-                ]),
-            ]
-        )
-        mount_info = "SSE: GET /mcp/sse"
+                Route("/health", health_endpoint, methods=["GET"]),
+                Mount("/", app=transport_app),
+            ]),
+        ]
+    )
 
     # CORS para clientes basados en Web/Electron (Cursor)
     app.add_middleware(
