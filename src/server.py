@@ -79,9 +79,10 @@ def create_server():
             Route("/health", health_endpoint, methods=["GET"]),
             # Expose standard SSE (for Cursor and older clients)
             # mcp.sse_app() internally configures routes for `/sse` and `/messages`
+            # Traefik passes `/mcp` verbatim, so we mount at `/mcp`
+            Mount("/mcp", app=mcp.sse_app()), 
+            # Local dev fallback 
             Mount("/", app=mcp.sse_app()), 
-            # Expose new Streamable HTTP fallback
-            # Mount("/mcp", app=mcp.streamable_http_app()), 
         ]
     )
 
