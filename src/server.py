@@ -82,29 +82,30 @@ def create_server():
     register_system_tools(mcp, config)
 
     # ──────────────────────────────────────────────────────────────
-    # ROUTING FIX:
+    # ROUTING:
     #
-    # Dokploy (Traefik) está configurado con:
-    #   Path: /mcp  |  Strip Path: NO
+    # El frontend (Nginx) proxea /mcp/* a este contenedor:
+    #   location /mcp/ { proxy_pass http://mcp-bridge:8000/mcp/; }
     #
-    # Esto significa que el contenedor recibe las peticiones tal cual:
+    # Nginx envía las peticiones tal cual con el prefijo /mcp:
     #   GET  /mcp/sse          → handshake SSE
     #   POST /mcp/messages/xxx → mensajes MCP
+    #   GET  /mcp/version      → endpoint de versión
     #
-    # Por lo tanto, montamos el SSE app en "/mcp".
-    # Esto hace que Starlette le quite el prefijo "/mcp" internamente
-    # y SSE vea "/sse" y "/messages/" como espera.
-    #
-    # Además, como SSE está montado en "/mcp", automáticamente genera
-    # las URLs de callback como "/mcp/messages/xxx" — ¡exactamente lo
-    # que Traefik necesita recibir de vuelta! No se necesita ningún
-    # middleware de reescritura.
+    # Starlette monta el SSE app bajo "/mcp", strippea el prefijo
+    # internamente y le pasa "/sse", "/messages/" al SSE app.
+    # Las rutas /version y /health están disponibles tanto en
+    # raíz (/) como bajo /mcp/ para diagnóstico.
     # ──────────────────────────────────────────────────────────────
     app = Starlette(
         routes=[
             Route("/health", health_endpoint, methods=["GET"]),
             Route("/version", version_endpoint, methods=["GET"]),
-            Mount("/mcp", app=mcp.sse_app()),
+            Mount("/mcp", routes=[
+                Route("/version", version_endpoint, methods=["GET"]),
+                Route("/health", health_endpoint, methods=["GET"]),
+                Mount("/", app=mcp.sse_app()),
+            ]),
         ]
     )
 
