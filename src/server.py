@@ -50,6 +50,22 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
         return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
 
 
+class TraefikRootPathMiddleware(BaseHTTPMiddleware):
+    """
+    Forces the ASGI scope's root_path to a specific prefix.
+    When Traefik strips the path (e.g. /mcp), the Starlette app doesn't know it's mounted.
+    This ensures FastMCP's SSE endpoint URI generator explicitly includes /mcp
+    so the client Cursor knows where to POST the subsequent messages.
+    """
+    def __init__(self, app, root_path: str):
+        super().__init__(app)
+        self.root_path = root_path
+        
+    async def dispatch(self, request, call_next):
+        request.scope["root_path"] = self.root_path
+        return await call_next(request)
+
+
 def health_endpoint(request):
     return PlainTextResponse("ok")
 
@@ -77,14 +93,13 @@ def create_server():
     app = Starlette(
         routes=[
             Route("/health", health_endpoint, methods=["GET"]),
-            # Expose standard SSE (for Cursor and older clients)
-            # mcp.sse_app() internally configures routes for `/sse` and `/messages`
-            # Traefik passes `/mcp` verbatim, so we mount at `/mcp`
-            Mount("/mcp", app=mcp.sse_app()), 
-            # Local dev fallback 
+            # When Dokploy's (Traefik) Strip Path is true, it passes /sse and /messages/ directly
             Mount("/", app=mcp.sse_app()), 
         ]
     )
+
+    # Add middleare to force '/mcp' root path so the SSE server sends the correct callback URL
+    app.add_middleware(TraefikRootPathMiddleware, root_path="/mcp")
 
     if config.basic_auth:
         app.add_middleware(BasicAuthMiddleware, expected_credentials=config.basic_auth)
