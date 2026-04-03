@@ -78,9 +78,10 @@ def create_server():
         routes=[
             Route("/health", health_endpoint, methods=["GET"]),
             # Expose standard SSE (for Cursor and older clients)
-            Mount("/sse", app=mcp.sse_app()), 
-            # Expose new Streamable HTTP
-            Mount("/mcp", app=mcp.streamable_http_app()), 
+            # mcp.sse_app() internally configures routes for `/sse` and `/messages`
+            Mount("/", app=mcp.sse_app()), 
+            # Expose new Streamable HTTP fallback
+            # Mount("/mcp", app=mcp.streamable_http_app()), 
         ]
     )
 
