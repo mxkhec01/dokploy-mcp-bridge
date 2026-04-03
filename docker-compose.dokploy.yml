@@ -1,0 +1,38 @@
+# =============================================================
+# Dokploy MCP Bridge — Template para desplegar como sidecar
+# Copiar este servicio dentro del docker-compose de tu stack.
+# =============================================================
+#
+# Variables requeridas en .env o en Dokploy:
+#   DATABASE_URI=postgresql://user:pass@db_service:5432/dbname
+#   MCP_BASIC_AUTH=usuario:$$apr1$$hash_escapado
+#
+# Para múltiples DBs, agregar:
+#   DATABASE_URI_PUI=postgresql://...
+#   DATABASE_URI_CEVI=mysql://...
+#
+
+services:
+  mcp-bridge:
+    image: ghcr.io/mxkhec01/dokploy-mcp-bridge:latest
+    restart: unless-stopped
+    environment:
+      - DATABASE_URI=${DATABASE_URI}
+      # Multi-DB: descomenta y agrega más aliases
+      # - DATABASE_URI_PUI=${DATABASE_URI_PUI}
+      # - DATABASE_URI_CEVI=${DATABASE_URI_CEVI}
+      - ACCESS_MODE=restricted
+    volumes:
+      # CRITICAL: Read-only Docker socket mount
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    cap_drop:
+      - ALL
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mcp-bridge.rule=Host(`mcp.tudominio.com`)"
+      - "traefik.http.routers.mcp-bridge.entrypoints=websecure"
+      - "traefik.http.routers.mcp-bridge.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mcp-bridge.loadbalancer.server.port=8000"
+      # BasicAuth middleware
+      - "traefik.http.routers.mcp-bridge.middlewares=mcp-auth"
+      - "traefik.http.middlewares.mcp-auth.basicauth.users=${MCP_BASIC_AUTH}"

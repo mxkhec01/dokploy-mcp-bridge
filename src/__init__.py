@@ -1,0 +1,1 @@
+# dokploy-mcp-bridge

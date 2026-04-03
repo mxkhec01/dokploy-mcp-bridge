@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+!.env.example
+.git/
+.gitignore
+.tmp/
+.agent/
+*.md
+!requirements.txt
+docker-compose.dokploy.yml
+scripts/
+.github/
+servidor_mcp.md

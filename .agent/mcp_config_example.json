@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "DokployBridge": {
+      "transport": "streamable-http",
+      "serverUrl": "https://mcp.tudominio.com/mcp",
+      "headers": {
+        "Authorization": "Basic <base64(user:pass)>"
+      },
+      "executionPolicy": "Request review"
+    }
+  }
+}
