@@ -1,15 +1,19 @@
 """
 Docker operations tools for the Dokploy MCP Bridge.
 Provides container observability and (in admin mode) restart capabilities.
+Includes Stack Isolation to ensure the bridge only sees containers in its own compose project.
 """
 
 import docker
+import socket
 
 from src.config import BridgeConfig
 
 # Module-level client — initialized once
 _docker_client = None
 _docker_error = None
+_compose_project_name = None
+_compose_project_checked = False
 
 
 def _get_client():
@@ -26,6 +30,56 @@ def _get_client():
     return _docker_client, _docker_error
 
 
+def _get_compose_project(client):
+    """
+    Auto-detect the Docker Compose project this bridge container belongs to.
+    This effectively isolates the environment to its own Stack.
+    """
+    global _compose_project_name, _compose_project_checked
+    if _compose_project_checked:
+        return _compose_project_name
+    
+    _compose_project_checked = True
+    
+    def extract_from_container(cid):
+        try:
+            container = client.containers.get(cid)
+            return container.labels.get("com.docker.compose.project")
+        except docker.errors.NotFound:
+            return None
+
+    # 1. Try hostname (default is container short ID in Docker)
+    hostname = socket.gethostname()
+    proj = extract_from_container(hostname)
+    if proj:
+        _compose_project_name = proj
+        return proj
+        
+    # 2. Advanced fallback: read from /proc/self/mountinfo
+    try:
+        with open("/proc/self/mountinfo", "r") as f:
+            for line in f:
+                if "/docker/containers/" in line:
+                    cid = line.split("/docker/containers/")[1].split("/")[0]
+                    proj = extract_from_container(cid)
+                    if proj:
+                        _compose_project_name = proj
+                        return proj
+    except Exception:
+        pass
+
+    return None
+
+def _validate_container_isolation(client, container) -> str:
+    """Returns an error string if the container is outside the current stack, else empty."""
+    project_name = _get_compose_project(client)
+    if project_name:
+        container_project = container.labels.get("com.docker.compose.project")
+        if container_project != project_name:
+            return f"🛑 SECURITY: Container '{container.name}' belongs to stack '{container_project}', not the isolated stack '{project_name}'."
+    return ""
+
+
 def register_docker_tools(mcp, config: BridgeConfig):
     """Register all Docker tools onto the MCP server."""
 
@@ -33,6 +87,7 @@ def register_docker_tools(mcp, config: BridgeConfig):
     def docker_list_containers(all_containers: bool = False) -> str:
         """
         List Docker containers visible from the bridge.
+        Automatically isolated to the current compose project/stack.
 
         Args:
             all_containers: If True, include stopped containers. Default: only running.
@@ -42,9 +97,15 @@ def register_docker_tools(mcp, config: BridgeConfig):
             return f"Docker API unavailable: {err}"
 
         try:
-            containers = client.containers.list(all=all_containers)
+            filters = {}
+            project_name = _get_compose_project(client)
+            
+            if project_name:
+                filters["label"] = f"com.docker.compose.project={project_name}"
+                
+            containers = client.containers.list(all=all_containers, filters=filters)
             if not containers:
-                return "No containers found."
+                return f"No containers found in stack {'(' + project_name + ')' if project_name else ''}."
 
             lines = []
             for c in containers:
@@ -55,8 +116,8 @@ def register_docker_tools(mcp, config: BridgeConfig):
                     f"  {c.short_id} | {c.name:<30} | {c.status}{health}"
                 )
 
-            header = "ID         | Name                           | Status"
-            separator = "-" * 70
+            header = f"ID         | Name                           | Status     [Stack: {project_name or 'Global'}]"
+            separator = "-" * 80
             return f"{header}\n{separator}\n" + "\n".join(lines)
         except Exception as e:
             return f"Docker error: {e}"
@@ -79,18 +140,18 @@ def register_docker_tools(mcp, config: BridgeConfig):
 
         try:
             container = client.containers.get(container_name)
+            
+            isolation_err = _validate_container_isolation(client, container)
+            if isolation_err: return isolation_err
 
             kwargs = {"tail": tail, "stdout": True, "stderr": True}
             if since:
-                # Docker SDK accepts seconds (int) or datetime
                 if since.endswith("m"):
                     import time
-
                     minutes = int(since.rstrip("m"))
                     kwargs["since"] = int(time.time()) - (minutes * 60)
                 elif since.endswith("h"):
                     import time
-
                     hours = int(since.rstrip("h"))
                     kwargs["since"] = int(time.time()) - (hours * 3600)
                 else:
@@ -122,6 +183,10 @@ def register_docker_tools(mcp, config: BridgeConfig):
 
         try:
             container = client.containers.get(container_name)
+            
+            isolation_err = _validate_container_isolation(client, container)
+            if isolation_err: return isolation_err
+            
             attrs = container.attrs
             state = attrs.get("State", {})
             net_settings = attrs.get("NetworkSettings", {})
@@ -197,6 +262,10 @@ def register_docker_tools(mcp, config: BridgeConfig):
 
         try:
             container = client.containers.get(container_name)
+            
+            isolation_err = _validate_container_isolation(client, container)
+            if isolation_err: return isolation_err
+            
             stats = container.stats(stream=False)
 
             # CPU calculation
@@ -265,6 +334,10 @@ def register_docker_tools(mcp, config: BridgeConfig):
 
         try:
             container = client.containers.get(container_name)
+            
+            isolation_err = _validate_container_isolation(client, container)
+            if isolation_err: return isolation_err
+            
             container.restart(timeout=timeout)
             return f"✅ Container '{container_name}' restarted successfully."
         except docker.errors.NotFound:
