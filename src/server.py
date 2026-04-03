@@ -77,8 +77,10 @@ def create_server():
     app = Starlette(
         routes=[
             Route("/health", health_endpoint, methods=["GET"]),
-            # FastMCP streamable-http attaches to '/' of its mounted app
-            Mount("/", app=mcp.streamable_http_app()), 
+            # Expose standard SSE (for Cursor and older clients)
+            Mount("/sse", app=mcp.sse_app()), 
+            # Expose new Streamable HTTP
+            Mount("/mcp", app=mcp.streamable_http_app()), 
         ]
     )
 
@@ -94,7 +96,7 @@ def create_server():
     print(
         f"\n{'=' * 50}\n"
         f"  Dokploy MCP Bridge v1.0.0\n"
-        f"  Transport:  {config.transport}\n"
+        f"  Transport:  {config.transport} (SSE Available locally via /sse, MCP via /mcp)\n"
         f"  Mode:       {mode_icon} {config.access_mode}\n"
         f"  Security:   {auth_status}\n"
         f"  Databases:  {db_count} configured\n"
@@ -108,11 +110,11 @@ def create_server():
 
 def main():
     app, config = create_server()
-    if config.transport == "streamable-http":
+    if config.transport in ["streamable-http", "sse"]:
         uvicorn.run(app, host=config.host, port=config.port, log_level="info")
     else:
         # Fallback for stdio
-        raise NotImplementedError("Only streamable-http transport is currently supported with the custom Starlette runner.")
+        raise NotImplementedError("Only streamable-http/sse transports are currently supported with the custom Starlette runner.")
 
 
 if __name__ == "__main__":

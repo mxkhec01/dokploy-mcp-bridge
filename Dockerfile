@@ -18,7 +18,7 @@ COPY src/ ./src/
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/mcp || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
 ENTRYPOINT ["python", "-m", "src.server"]
-CMD ["--transport=streamable-http", "--access-mode=restricted"]
+CMD ["--transport=sse", "--access-mode=restricted"]
