@@ -56,18 +56,23 @@ def health_endpoint(request):
     return PlainTextResponse("ok")
 
 
+# Se asigna dinámicamente al crear el server
+_active_transport = "sse"
+
 def version_endpoint(request):
     """Endpoint público para verificar qué versión está corriendo."""
     return JSONResponse({
         "service": "Dokploy-MCP-Bridge",
         "version": BUILD_VERSION,
-        "transport": "sse",
+        "transport": _active_transport,
     })
 
 
 def create_server():
     """Create and configure the MCP server with all tools."""
+    global _active_transport
     config = load_config()
+    _active_transport = config.transport
 
     mcp = FastMCP(
         "Dokploy-MCP-Bridge",
@@ -82,32 +87,51 @@ def create_server():
     register_system_tools(mcp, config)
 
     # ──────────────────────────────────────────────────────────────
-    # ROUTING:
+    # ROUTING (dual transport support):
     #
-    # El frontend (Nginx) proxea /mcp/* a este contenedor:
-    #   location /mcp/ { proxy_pass http://mcp-bridge:8000/mcp/; }
+    # Streamable HTTP (default — recommended for Cursor/Antigravity):
+    #   POST /mcp  → initialize + all JSON-RPC messages
+    #   GET  /mcp  → optional SSE stream for server notifications
+    #   DELETE /mcp → session termination
     #
-    # Nginx envía las peticiones tal cual con el prefijo /mcp:
+    # SSE (legacy):
     #   GET  /mcp/sse          → handshake SSE
     #   POST /mcp/messages/xxx → mensajes MCP
-    #   GET  /mcp/version      → endpoint de versión
     #
-    # Starlette monta el SSE app bajo "/mcp", strippea el prefijo
-    # internamente y le pasa "/sse", "/messages/" al SSE app.
-    # Las rutas /version y /health están disponibles tanto en
-    # raíz (/) como bajo /mcp/ para diagnóstico.
+    # Both modes expose /health and /version at root and under /mcp/.
     # ──────────────────────────────────────────────────────────────
-    app = Starlette(
-        routes=[
-            Route("/health", health_endpoint, methods=["GET"]),
-            Route("/version", version_endpoint, methods=["GET"]),
-            Mount("/mcp", routes=[
-                Route("/version", version_endpoint, methods=["GET"]),
+
+    if config.transport == "streamable-http":
+        # FastMCP http_app crea un Starlette app con ruta en `path`.
+        # Lo montamos en raíz para que /mcp sea el endpoint final.
+        mcp_app = mcp.http_app(
+            path="/mcp",
+            transport="streamable-http",
+            json_response=True,
+            stateless_http=True,
+        )
+        # Inyectamos nuestras rutas auxiliares en el app de FastMCP
+        from starlette.routing import Route as SRoute
+        mcp_app.routes.insert(0, SRoute("/health", health_endpoint, methods=["GET"]))
+        mcp_app.routes.insert(1, SRoute("/version", version_endpoint, methods=["GET"]))
+        mcp_app.routes.insert(2, SRoute("/mcp/health", health_endpoint, methods=["GET"]))
+        mcp_app.routes.insert(3, SRoute("/mcp/version", version_endpoint, methods=["GET"]))
+        app = mcp_app
+        mount_info = "Streamable HTTP: POST /mcp"
+    else:
+        # SSE transport (legacy)
+        app = Starlette(
+            routes=[
                 Route("/health", health_endpoint, methods=["GET"]),
-                Mount("/", app=mcp.sse_app()),
-            ]),
-        ]
-    )
+                Route("/version", version_endpoint, methods=["GET"]),
+                Mount("/mcp", routes=[
+                    Route("/version", version_endpoint, methods=["GET"]),
+                    Route("/health", health_endpoint, methods=["GET"]),
+                    Mount("/", app=mcp.sse_app()),
+                ]),
+            ]
+        )
+        mount_info = "SSE: GET /mcp/sse"
 
     # CORS para clientes basados en Web/Electron (Cursor)
     app.add_middleware(
@@ -134,7 +158,7 @@ def create_server():
         f"  Security:   {auth_status}\n"
         f"  Databases:  {db_count} configured\n"
         f"  Listening:  {config.host}:{config.port}\n"
-        f"  SSE Mount:  /mcp/sse\n"
+        f"  Endpoint:   {mount_info}\n"
         f"{'=' * 50}\n",
         file=sys.stderr,
     )
