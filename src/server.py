@@ -119,7 +119,9 @@ def create_server():
     )
 
     # FIX 3: Inyectamos el middleware que corrige el bug de la ruta de Traefik
-    app.add_middleware(TraefikSSEFixMiddleware, public_prefix="/mcp")
+    import os
+    public_prefix = os.environ.get("MCP_PUBLIC_PREFIX", "/mcp")
+    app.add_middleware(TraefikSSEFixMiddleware, public_prefix=public_prefix)
 
     if config.basic_auth:
         app.add_middleware(BasicAuthMiddleware, expected_credentials=config.basic_auth)
