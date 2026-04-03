@@ -6,10 +6,10 @@ import sys
 import base64
 import uvicorn
 from starlette.applications import Starlette
-from starlette.responses import Response, PlainTextResponse, StreamingResponse
+from starlette.responses import Response, PlainTextResponse
 from starlette.routing import Mount, Route
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.middleware.cors import CORSMiddleware  # <-- IMPORTANTE NUEVO IMPORT
+from starlette.middleware.cors import CORSMiddleware
 
 from mcp.server.fastmcp import FastMCP
 
@@ -25,7 +25,7 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
         self.expected = expected_credentials
         
     async def dispatch(self, request, call_next):
-        # FIX 1: Excluir el healthcheck y las peticiones de CORS (OPTIONS) del chequeo de Auth
+        # 🟢 FIX 1: Permitir peticiones "Pre-flight" (OPTIONS) para evitar bloqueos de CORS
         if request.url.path == "/health" or request.method == "OPTIONS":
             return await call_next(request)
 
@@ -45,41 +45,30 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
         return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
 
 
-class TraefikSSEFixMiddleware(BaseHTTPMiddleware):
+class SSEPathRewriteMiddleware:
     """
-    Sustituye a TraefikRootPathMiddleware.
-    Intercepta el flujo SSE en tiempo real y reescribe el endpoint para que el 
-    cliente sepa que debe inyectar el prefijo /mcp en sus peticiones POST.
+    🟢 FIX 2: Middleware ASGI puro. 
+    Intercepta el texto que FastMCP le devuelve al IDE y le inyecta
+    el prefijo '/mcp' para engañar al StripPrefix de Traefik/Dokploy.
     """
-    def __init__(self, app, public_prefix: str = "/mcp"):
-        super().__init__(app)
-        self.public_prefix = public_prefix
-        
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        
-        # Si la respuesta es un flujo SSE, lo modificamos al vuelo
-        if response.headers.get("content-type", "").startswith("text/event-stream"):
-            original_iterator = getattr(response, "body_iterator", None)
-            if original_iterator:
-                async def rewrite_generator():
-                    async for chunk in original_iterator:
-                        # Remplazamos la orden que FastMCP le da al cliente
-                        if isinstance(chunk, bytes):
-                            chunk = chunk.replace(b"data: /messages", f"data: {self.public_prefix}/messages".encode("utf-8"))
-                        elif isinstance(chunk, str):
-                            chunk = chunk.replace("data: /messages", f"data: {self.public_prefix}/messages")
-                        yield chunk
-                        
-                headers = dict(response.headers)
-                headers.pop("content-length", None)
-                return StreamingResponse(
-                    rewrite_generator(),
-                    status_code=response.status_code,
-                    headers=headers
-                )
-                
-        return response
+    def __init__(self, app, prefix: str = "/mcp"):
+        self.app = app
+        self.prefix = prefix
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.body":
+                body = message.get("body", b"")
+                # Si FastMCP instruye conectarse a "/messages", le agregamos "/mcp"
+                if b"/messages" in body and b"/mcp/messages" not in body:
+                    body = body.replace(b"/messages", f"{self.prefix}/messages".encode("utf-8"))
+                message["body"] = body
+            await send(message)
+
+        return await self.app(scope, receive, send_wrapper)
 
 
 def health_endpoint(request):
@@ -94,10 +83,10 @@ def create_server():
         "Dokploy-MCP-Bridge",
         port=config.port,
         host=config.host,
+        stateless_http=True,
         json_response=True,
     )
 
-    # Register all tool modules
     register_db_tools(mcp, config)
     register_docker_tools(mcp, config)
     register_system_tools(mcp, config)
@@ -109,7 +98,8 @@ def create_server():
         ]
     )
 
-    # FIX 2: Añadimos CORS nativo para clientes basados en Web/Electron
+    # 🟢 FIX 3: El CORS DEBE ir al final para que Starlette lo envuelva como la 
+    # capa más externa y atienda las peticiones OPTIONS antes que el Auth.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -118,24 +108,21 @@ def create_server():
         allow_headers=["*"],
     )
 
-    # FIX 3: Inyectamos el middleware que corrige el bug de la ruta de Traefik
-    import os
-    public_prefix = os.environ.get("MCP_PUBLIC_PREFIX", "/mcp")
-    app.add_middleware(TraefikSSEFixMiddleware, public_prefix=public_prefix)
-
     if config.basic_auth:
         app.add_middleware(BasicAuthMiddleware, expected_credentials=config.basic_auth)
         auth_status = "🔒 BasicAuth Enabled (Application Level)"
     else:
         auth_status = "🔓 No Auth (Unsafe for Public Networks)"
 
-    # Banner
-    mode_icon = "🔓" if config.is_admin else "🔒"
-    db_count = len(config.db_uris)
+    # Aplicamos el parche de ruta ASGI como la capa más externa (después de Starlette middlewares)
+    app = SSEPathRewriteMiddleware(app, prefix="/mcp")
+
+    mode_icon = "🔓" if getattr(config, 'is_admin', False) else "🔒"
+    db_count = len(getattr(config, 'db_uris', []))
     print(
         f"\n{'=' * 50}\n"
-        f"  Dokploy MCP Bridge v1.0.0\n"
-        f"  Transport:  {config.transport} (SSE Available locally via /sse, MCP via /mcp)\n"
+        f"  Dokploy MCP Bridge v1.0.2 (Traefik Fix Injected)\n"
+        f"  Transport:  {config.transport}\n"
         f"  Mode:       {mode_icon} {config.access_mode}\n"
         f"  Security:   {auth_status}\n"
         f"  Databases:  {db_count} configured\n"
@@ -152,8 +139,7 @@ def main():
     if config.transport in ["streamable-http", "sse"]:
         uvicorn.run(app, host=config.host, port=config.port, log_level="info")
     else:
-        raise NotImplementedError("Only streamable-http/sse transports are currently supported with the custom Starlette runner.")
-
+        raise NotImplementedError("Only streamable-http/sse transports are currently supported.")
 
 if __name__ == "__main__":
     main()
