@@ -347,10 +347,56 @@ def register_docker_tools(mcp, config: BridgeConfig):
         except Exception as e:
             return f"Error restarting container: {e}"
 
+    @mcp.tool()
+    def docker_exec(container_name: str, command: str, workdir: str = None) -> str:
+        """
+        Execute a command inside a running container. Only available in admin mode.
+        Useful for running management commands, DB migrations, or interactive diagnostics.
+
+        Args:
+            container_name: Container name or ID.
+            command: The command string to execute (e.g., 'env', 'redis-cli INFO', 'python -c "print(1)"').
+            workdir: Optional working directory inside the container.
+        """
+        if config.is_restricted:
+            return (
+                "🛑 SECURITY: Command execution is blocked in restricted mode. "
+                "Set --access-mode=admin to enable."
+            )
+
+        client, err = _get_client()
+        if not client:
+            return f"Docker API unavailable: {err}"
+
+        try:
+            container = client.containers.get(container_name)
+            
+            # exec_run returns a tuple (exit_code, output)
+            exit_code, output = container.exec_run(
+                cmd=command,
+                workdir=workdir,
+                stdout=True,
+                stderr=True
+            )
+            
+            decoded = output.decode("utf-8", errors="replace")
+            
+            if exit_code != 0:
+                return f"Command exited with code {exit_code}:\n{decoded}"
+            
+            return decoded if decoded.strip() else "Command executed successfully (no output)."
+        except docker.errors.NotFound:
+            return f"Container '{container_name}' not found."
+        except docker.errors.APIError as e:
+            return f"Docker API error: {e}"
+        except Exception as e:
+            return f"Error executing command: {e}"
+
     return [
         docker_list_containers,
         docker_get_logs,
         docker_inspect,
         docker_stats,
         docker_restart,
+        docker_exec,
     ]
