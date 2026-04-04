@@ -67,7 +67,7 @@ def load_config() -> BridgeConfig:
     )
     parser.add_argument(
         "--access-mode",
-        default=os.getenv("ACCESS_MODE", "restricted"),
+        default=os.getenv("MCP_ACCESS_MODE", "restricted"),
         choices=["restricted", "admin"],
         help="Access control mode",
     )

@@ -14,7 +14,7 @@ services:
     environment:
       - DATABASE_URI=${POSTGRES_URL}
       # - DATABASE_URI_OTRA=${MYSQL_URL}
-      - ACCESS_MODE=restricted
+      - MCP_ACCESS_MODE=restricted
       # Autenticación Básica a nivel aplicación (Texto plano, ej. admin:mi_contraseña)
       - MCP_BASIC_AUTH=${MCP_BASIC_AUTH}
     volumes:
